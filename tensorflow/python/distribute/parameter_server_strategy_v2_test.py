@@ -190,17 +190,6 @@ class ParameterServerStrategyV2Test(test.TestCase):
     self.assertEqual(v6.device, "/job:ps/replica:0/task:0/device:CPU:0")
 
   @contextlib.contextmanager
-  def _assertRaisesUsageError(self):
-    with self.assertRaisesRegexp(
-        NotImplementedError,
-        "`tf.distribute.experimental.ParameterServerStrategy` must be used "
-        "with `tf.distribute.experimental.coordinator.ClusterCoordinator` in "
-        "a custom training loop. If you are using `Model.fit`, please supply "
-        "a dataset function directly to a "
-        "`tf.keras.utils.experimental.DatasetCreator` instead."):
-      yield
-
-  @contextlib.contextmanager
   def _assertRaisesUsageWarningWithSchedule(self):
     with self.assertLogs(level="WARNING") as logs:
       yield
@@ -247,24 +236,18 @@ class ParameterServerStrategyV2Test(test.TestCase):
     with self._assertRaisesUsageWarningWithSchedule():
       strategy.reduce("SUM", None, axis=None)
 
-  def testDistributeDatasetNotUsedWithClusterCoordinator(self):
+  def testDistributeDatasetUsedDirectly(self):
     strategy = parameter_server_strategy_v2.ParameterServerStrategyV2(
         self.cluster_resolver)
     dataset = dataset_ops.DatasetV2.range(3)
-    with self._assertRaisesUsageError():
-      def_function.function(
-          lambda: strategy.experimental_distribute_dataset(dataset))()
+    distributed_dataset = strategy.experimental_distribute_dataset(dataset)
+    with self.assertRaises(ValueError):
+      iter(distributed_dataset)
 
-  def testDistributeDatasetFromFunctionNotUsedWithClusterCoordinator(self):
-    strategy = parameter_server_strategy_v2.ParameterServerStrategyV2(
-        self.cluster_resolver)
-
-    def dataset_fn(_):
-      return dataset_ops.DatasetV2.range(3)
-
-    with self._assertRaisesUsageError():
-      def_function.function(
-          lambda: strategy.distribute_datasets_from_function(dataset_fn))()
+    distributed_dataset = strategy.distribute_datasets_from_function(
+        lambda: dataset)
+    with self.assertRaises(ValueError):
+      iter(distributed_dataset)
 
   def testSparselyReadForEmbeddingLookup(self):
     strategy = parameter_server_strategy_v2.ParameterServerStrategyV2(
@@ -312,10 +295,15 @@ class ParameterServerStrategyV2Test(test.TestCase):
       for n in function.node_def:
         if n.op == "ResourceGather":
           found_resource_gather = True
+          resource_gather_device = n.device
         elif n.op == "Gather":
           found_gather = True
     self.assertTrue(found_resource_gather)
     self.assertFalse(found_gather)
+
+    # We also assert that the colocate_with in embedding_ops will not result in
+    # a hard-coded device string.
+    self.assertEmpty(resource_gather_device)
 
 
 class PartitionAwareIdentity(object):

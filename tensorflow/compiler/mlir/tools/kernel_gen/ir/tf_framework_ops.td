@@ -275,9 +275,19 @@ def TFFramework_JITCompileFromStrOp : TFFramework_Op<"jit_compile_from_str",
 
   let arguments = (ins
     Optional<TFFramework_OpKernelContextType>:$ctx,
-    StrAttr:$code
+    StrAttr:$code,
+    StrArrayAttr:$architectures,
+    I64ArrayAttr:$tileSizes,
+    I64ArrayAttr:$unrollFactors,
+    I64Attr:$maxSupportedRank,
+    BoolAttr:$enableFtz,
+    BoolAttr:$cpuCodegen
   );
   let results = (outs TFFramework_JITCallableType:$result);
+
+  let extraClassDeclaration = [{
+    static constexpr StringRef kJITEntryFunctionName = "main";
+  }];
 
   let assemblyFormat = "($ctx^ `,`)? $code attr-dict";
 }
@@ -308,8 +318,13 @@ def TFFramework_JITExecuteOp : TFFramework_Op<"jit_execute", [
     Variadic<AnyTypeOf<[AnyRankedOrUnrankedMemRef, AnyTensor]>>:$results
   );
 
+  let builders = [
+    OpBuilder<(ins "Optional<Value>":$ctx, "Value":$callable,
+        "ValueRange":$operands)>
+  ];
+
   let assemblyFormat = [{
-    (`ctx` `=` $ctx^ `,`)? $callable `(` $operands `)` attr-dict
+    (`ctx` `(` $ctx^ `)`)? $callable `(` $operands `)` attr-dict
         `:` type($operands) `->` type($results)
   }];
 }

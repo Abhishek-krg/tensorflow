@@ -22,5 +22,11 @@ add_mlir_library(MLIRMhloUtils
   hlo_utils.cc
 
   LINK_LIBS PUBLIC
+  MLIRIR
+  MLIRLLVMIR
+  MLIRMemRef
+  MLIRPass
+  MLIRShape
+  MLIRStandard
   MLIRSupport
   )

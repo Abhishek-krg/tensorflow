@@ -55,6 +55,26 @@ limitations under the License.
 
 namespace mlir {
 namespace TFL {
+namespace {
+
+Operation *getDefiningBroadcastArgsOp(Value operand) {
+  auto *defining_op = operand.getDefiningOp();
+  if (!llvm::dyn_cast_or_null<TF::BroadcastToOp>(defining_op) &&
+      !llvm::dyn_cast_or_null<TFL::BroadcastToOp>(defining_op)) {
+    return nullptr;
+  }
+
+  Value broadcast_shape = defining_op->getOperand(
+      1);  // Broadcasted shape operand of BroadcastTo op.
+  Operation *parent_of_defining_op = broadcast_shape.getDefiningOp();
+  if (!llvm::dyn_cast_or_null<TF::BroadcastArgsOp>(parent_of_defining_op) &&
+      !llvm::dyn_cast_or_null<TFL::BroadcastArgsOp>(parent_of_defining_op)) {
+    return nullptr;
+  }
+  return parent_of_defining_op;
+}
+
+}  // namespace
 
 // Returns true when the given operand arguments have the same shape or
 // broadcastable shape within the given rank. If any given shapes are
@@ -109,14 +129,40 @@ bool VerifyOperandsHaveSameShapesOrBroadcastableShape(
     current_shape = result_shape;
   }
 
-  // It will treat the unknown shape inputs as acceptable inputs for model
-  // compatibility unless there is an known rank that is bigger than the allowed
-  // broadcast maximum rank.
-  if (has_unknown_shape_input) return max_rank <= max_bcast_rank;
-
   // If all the shape is known and same, CPU kernels are able to handle inputs
   // regardless of dimension size.
-  return has_same_shape || max_rank <= max_bcast_rank;
+  if (!has_unknown_shape_input) {
+    return has_same_shape || max_rank <= max_bcast_rank;
+  }
+
+  // It will treat the unknown shape inputs as acceptable inputs for model
+  // compatibility if all known ranks are no bigger than the allowed broadcast
+  // maximum rank.
+  if (max_rank <= max_bcast_rank) {
+    return true;
+  }
+
+  // Checks if all operands are broadcasted by BroadcastTo ops with the shape
+  // is calculated from the same BroadcastArgs op. In such case, all operands
+  // will have the same shape.
+  Operation *broadcast_args_pivot = nullptr;
+  for (unsigned index : indices) {
+    Operation *parent_broadcast_args =
+        getDefiningBroadcastArgsOp(op->getOperand(index));
+    if (parent_broadcast_args == nullptr) {
+      return false;
+    }
+
+    if (broadcast_args_pivot == nullptr) {
+      broadcast_args_pivot = parent_broadcast_args;
+      continue;
+    }
+
+    if (broadcast_args_pivot != parent_broadcast_args) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Return true when the given element_type is QI8.
@@ -1913,6 +1959,19 @@ void SliceOp::getCanonicalizationPatterns(OwningRewritePatternList &results,
 }
 
 //===----------------------------------------------------------------------===//
+// SqueezeOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult SqueezeOp::fold(ArrayRef<Attribute> operands) {
+  auto input_ty = input().getType().dyn_cast<RankedTensorType>();
+  auto result_ty = getType().dyn_cast<RankedTensorType>();
+
+  if (!input_ty || !result_ty) return {};
+  if (input_ty == result_ty) return input();
+  return {};
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp
 //===----------------------------------------------------------------------===//
 
@@ -2918,6 +2977,21 @@ LogicalResult Verify(StridedSliceOp op) {
   // If input is unranked, there is nothing else to be verified.
   if (!ranked_input_type) return success();
   int num_input_dims = ranked_input_type.getRank();
+
+  if (auto begin_type = op.begin().getType().dyn_cast<RankedTensorType>()) {
+    if (begin_type.getRank() != 1) return failure();
+    if (begin_type.getDimSize(0) > num_input_dims) return failure();
+  }
+
+  if (auto end_type = op.end().getType().dyn_cast<RankedTensorType>()) {
+    if (end_type.getRank() != 1) return failure();
+    if (end_type.getDimSize(0) > num_input_dims) return failure();
+  }
+
+  if (auto strides_type = op.strides().getType().dyn_cast<RankedTensorType>()) {
+    if (strides_type.getRank() != 1) return failure();
+    if (strides_type.getDimSize(0) > num_input_dims) return failure();
+  }
 
   // The kernel will reshape the input tensor with new axis, it only supports
   // this reshaped tensor up to 5D.
